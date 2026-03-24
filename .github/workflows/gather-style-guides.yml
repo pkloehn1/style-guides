@@ -1,0 +1,98 @@
+name: Gather Style Guides
+
+on:
+  schedule:
+    # Runs every Monday at 00:00 UTC
+    - cron: '0 0 * * 1'
+  workflow_dispatch:
+
+jobs:
+  gather:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout style-guides repo
+        uses: actions/checkout@v4
+
+      - name: Gather style guides from all repos
+        env:
+          # A Personal Access Token (classic) with `repo` scope is required to
+          # read private repositories. Create one at
+          # https://github.com/settings/tokens and add it as a repository
+          # secret named STYLE_GUIDES_PAT.
+          GH_TOKEN: ${{ secrets.STYLE_GUIDES_PAT }}
+        run: |
+          set -euo pipefail
+
+          OUTPUT_DIR="docs/repository-standards/style-guides"
+          mkdir -p "$OUTPUT_DIR"
+
+          # Style guide file candidates, in order of preference
+          CANDIDATES=(
+            "STYLE_GUIDE.md"
+            "docs/STYLE_GUIDE.md"
+            "docs/style-guide.md"
+            ".github/STYLE_GUIDE.md"
+            "CONTRIBUTING.md"
+          )
+
+          # Fetch all repos using pagination (1000 per page is the maximum
+          # supported by gh repo list; increase if needed).
+          REPOS=$(gh repo list --limit 1000 --json nameWithOwner --jq '.[].nameWithOwner')
+
+          CURRENT_REPO="${{ github.repository }}"
+
+          for REPO in $REPOS; do
+            # Skip this repo itself
+            if [ "$REPO" = "$CURRENT_REPO" ]; then
+              continue
+            fi
+
+            # Sanitize the full "owner/repo" path into a safe filename
+            # (e.g. "acme-org/my-repo" -> "acme-org--my-repo.md")
+            # This avoids collisions when repos from different owners share a name.
+            SAFE_NAME=$(echo "$REPO" | sed 's|/|--|g')
+            FOUND=false
+
+            # Determine the default branch for accurate source URLs
+            DEFAULT_BRANCH=$(gh api "repos/$REPO" --jq '.default_branch' 2>/dev/null || echo "main")
+
+            for CANDIDATE in "${CANDIDATES[@]}"; do
+              # Try to download the file; skip if not found
+              if gh api "repos/$REPO/contents/$CANDIDATE" \
+                  --jq '.content' 2>/dev/null | \
+                  base64 --decode > "/tmp/${SAFE_NAME}.md" 2>/dev/null; then
+                # Verify the file has content
+                if [ -s "/tmp/${SAFE_NAME}.md" ]; then
+                  echo "Found $CANDIDATE in $REPO"
+                  # Add a header comment indicating source
+                  {
+                    echo "<!-- Source: https://github.com/$REPO/blob/$DEFAULT_BRANCH/$CANDIDATE -->"
+                    echo ""
+                    cat "/tmp/${SAFE_NAME}.md"
+                  } > "$OUTPUT_DIR/${SAFE_NAME}.md"
+                  FOUND=true
+                  break
+                fi
+              fi
+            done
+
+            if [ "$FOUND" = "false" ]; then
+              echo "No style guide found in $REPO — skipping"
+            fi
+          done
+
+      - name: Commit and push changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/repository-standards/style-guides/
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "chore: update gathered style guides [skip ci]"
+            git push
+          fi
